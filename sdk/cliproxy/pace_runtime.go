@@ -2,25 +2,56 @@ package cliproxy
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	log "github.com/sirupsen/logrus"
 )
 
+const defaultPaceProbeInterval = 10 * time.Minute
+
+// currentConfig reads the active config under the config lock, as reloads
+// replace it.
+func (s *Service) currentConfig() *config.Config {
+	s.cfgMu.RLock()
+	defer s.cfgMu.RUnlock()
+	return s.cfg
+}
+
 // paceEnabled reports whether the configured routing strategy is pace.
 func (s *Service) paceEnabled() bool {
-	return normalizedRoutingRuntimeState(s.cfg).strategy == "pace"
+	return normalizedRoutingRuntimeState(s.currentConfig()).strategy == "pace"
+}
+
+// paceProbeInterval parses routing.pace-probe-interval: "0" disables polling,
+// a positive duration is used as is, anything else is the 10-minute default.
+// It is kept out of routingRuntimeState on purpose: a change to that state
+// rebuilds the selector and drops every session binding.
+func paceProbeInterval(cfg *config.Config) time.Duration {
+	if cfg == nil {
+		return defaultPaceProbeInterval
+	}
+	interval := strings.TrimSpace(cfg.Routing.PaceProbeInterval)
+	if interval == "0" {
+		return 0
+	}
+	if parsed, errParse := time.ParseDuration(interval); errParse == nil && parsed > 0 {
+		return parsed
+	}
+	return defaultPaceProbeInterval
 }
 
 // paceStateStore returns the store for <auth-dir>/pace.state, or nil when the
 // auth directory cannot be resolved.
 func (s *Service) paceStateStore() *coreauth.PaceStateStore {
-	if s.cfg == nil {
+	cfg := s.currentConfig()
+	if cfg == nil {
 		return nil
 	}
-	authDir, errResolve := util.ResolveAuthDir(s.cfg.AuthDir)
+	authDir, errResolve := util.ResolveAuthDir(cfg.AuthDir)
 	if errResolve != nil {
 		log.Warnf("failed to resolve pace state directory: %v", errResolve)
 		return nil

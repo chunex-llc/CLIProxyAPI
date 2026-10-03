@@ -93,8 +93,7 @@ func (s *Service) Run(ctx context.Context) error {
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 		if s.paceEnabled() {
 			s.loadPaceState(ctx)
-			state := normalizedRoutingRuntimeState(s.cfg)
-			probe := newPaceProbe(s.cfg, s.coreManager, coreauth.DefaultPaceLedger(), state.paceProbeInterval)
+			probe := newPaceProbe(s.cfg, s.coreManager, coreauth.DefaultPaceLedger(), paceProbeInterval(s.cfg))
 			probe.afterCycle = s.savePaceState
 			go probe.Run(ctx)
 		}

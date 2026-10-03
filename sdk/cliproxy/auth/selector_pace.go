@@ -11,9 +11,9 @@ import (
 )
 
 // PaceSelector picks the available auth that is furthest behind even use of
-// its observed quota windows, from the merged per-window PaceLedger fed after
-// each upstream response, so allowance that would expire unused is spent
-// first. It is a custom selector, not a built-in one, and is meant to
+// its observed quota windows, read from the merged per-window PaceLedger that
+// upstream response headers and the usage poller both feed, so allowance that
+// would expire unused is spent first. It is a custom selector, not a built-in one, and is meant to
 // run as the session-affinity fallback: there it decides only new sessions,
 // expired bindings and failover, and the affinity wrapper hands it already
 // validated candidates.

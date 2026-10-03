@@ -168,6 +168,9 @@ func TestPaceLedger_SnapshotRestore(t *testing.T) {
 }
 
 func TestManagerMarkResultFeedsDefaultPaceLedger(t *testing.T) {
+	t.Cleanup(func() {
+		DefaultPaceLedger().Restore(nil, func(authID string) bool { return authID != "pace-ledger-mark-result-auth" })
+	})
 	manager := NewManager(nil, nil, nil)
 	auth, errRegister := manager.Register(context.Background(), &Auth{
 		ID:       "pace-ledger-mark-result-auth",

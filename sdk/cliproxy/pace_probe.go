@@ -51,8 +51,9 @@ func newPaceProbe(cfg *config.Config, manager *coreauth.Manager, ledger *coreaut
 	}
 }
 
-// Run probes every credential at once, then every interval until ctx is done.
-// A non-positive interval disables probing.
+// Run polls once immediately and then every interval until ctx is done; each
+// cycle probes the credentials one at a time. A non-positive interval
+// disables polling.
 func (p *paceProbe) Run(ctx context.Context) {
 	if p == nil || p.interval <= 0 {
 		return
@@ -127,7 +128,11 @@ func (p *paceProbe) probe(ctx context.Context, auth *coreauth.Auth) error {
 	if errDo != nil {
 		return errDo
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() {
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Errorf("pace probe: close usage response body: %v", errClose)
+		}
+	}()
 	body, errRead := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if errRead != nil {
 		return errRead

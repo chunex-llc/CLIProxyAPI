@@ -185,11 +185,15 @@ func TestPaceProbeIntervalConfig(t *testing.T) {
 		{"bogus", 10 * time.Minute},
 		{"", 10 * time.Minute},
 	} {
-		state := normalizedRoutingRuntimeState(&internalconfig.Config{
-			Routing: internalconfig.RoutingConfig{Strategy: "pace", PaceProbeInterval: tc.value},
-		})
-		if state.paceProbeInterval != tc.want {
-			t.Errorf("pace-probe-interval %q = %s, want %s", tc.value, state.paceProbeInterval, tc.want)
+		cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "pace", PaceProbeInterval: tc.value}}
+		if got := paceProbeInterval(cfg); got != tc.want {
+			t.Errorf("pace-probe-interval %q = %s, want %s", tc.value, got, tc.want)
+		}
+		// Changing only the interval must not look like a routing change,
+		// which would rebuild the selector and drop every session binding.
+		base := &internalconfig.Config{Routing: internalconfig.RoutingConfig{Strategy: "pace"}}
+		if normalizedRoutingRuntimeState(cfg) != normalizedRoutingRuntimeState(base) {
+			t.Errorf("pace-probe-interval %q changed routingRuntimeState", tc.value)
 		}
 	}
 }
