@@ -11,8 +11,12 @@ import (
 )
 
 // PaceSelector picks the available auth that is furthest behind even use of
-// its observed quota windows, so usage spreads toward whichever account has
-// the most headroom left relative to the time remaining before its reset.
+// its observed quota windows, from the passive snapshot (Quota.Signals)
+// recorded after each upstream response, so allowance that would expire unused
+// is spent first. It is a custom selector, not a built-in one, and is meant to
+// run as the session-affinity fallback: there it decides only new sessions,
+// expired bindings and failover, and the affinity wrapper hands it already
+// validated candidates.
 type PaceSelector struct{}
 
 // paceWindow is one observed quota window. resetAt and duration are zero when
@@ -24,14 +28,16 @@ type paceWindow struct {
 }
 
 const (
+	// paceMinTimeShare floors a window's remaining time share so a window about
+	// to reset scores at most 20x its remaining allowance instead of infinity.
 	paceMinTimeShare  = 0.05
 	paceFreshScore    = 100.0
 	claudeFiveHourWin = 300 * time.Minute
 	claudeSevenDayWin = 10080 * time.Minute
 )
 
-// Pick filters exactly like FillFirstSelector and returns the auth with the
-// highest pace score; ties go to the lowest auth ID.
+// Pick filters like FillFirstSelector and returns the auth with the highest
+// pace score; ties go to the lowest auth ID, matching fill-first's order.
 func (s *PaceSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = opts
 	now := time.Now()
@@ -60,7 +66,9 @@ func (s *PaceSelector) Pick(ctx context.Context, provider, model string, opts cl
 
 // paceScore rates how much quota an auth has left relative to the time left in
 // each window. An auth with no live windows scores as fresh (100). Higher is
-// further behind even use.
+// further behind even use. Several timed windows combine by harmonic mean so
+// the tightest window dominates without ignoring the others; once any window
+// is exhausted (score <= 0) the minimum wins so the auth sorts last.
 func paceScore(auth *Auth, now time.Time) float64 {
 	if auth == nil {
 		return paceFreshScore
