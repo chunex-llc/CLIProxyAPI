@@ -29,6 +29,7 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	paceProbeInterval        time.Duration
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -36,6 +37,7 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 		strategy:                 "round-robin",
 		sessionAffinityTTL:       time.Hour,
 		sessionAffinitySubagents: true,
+		paceProbeInterval:        10 * time.Minute,
 	}
 	if cfg == nil {
 		return state
@@ -56,6 +58,13 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 				parsed = time.Second
 			}
 			state.sessionAffinityTTL = parsed
+		}
+	}
+	if interval := strings.TrimSpace(cfg.Routing.PaceProbeInterval); interval == "0" {
+		state.paceProbeInterval = 0
+	} else if interval != "" {
+		if parsed, errParse := time.ParseDuration(interval); errParse == nil && parsed > 0 {
+			state.paceProbeInterval = parsed
 		}
 	}
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {

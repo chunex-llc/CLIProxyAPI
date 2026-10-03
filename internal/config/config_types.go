@@ -371,6 +371,11 @@ type RoutingConfig struct {
 	// When false, subagents are distributed across the credential pool via the fallback selector.
 	// Default: true. Ignored when SessionAffinity is false.
 	SessionAffinitySubagents *bool `yaml:"session-affinity-subagents,omitempty" json:"session-affinity-subagents,omitempty"`
+
+	// PaceProbeInterval specifies how often the pace strategy polls each credential's
+	// usage endpoint. Default: 10m. "0" disables polling.
+	// Ignored unless Strategy is "pace".
+	PaceProbeInterval string `yaml:"pace-probe-interval,omitempty" json:"pace-probe-interval,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
