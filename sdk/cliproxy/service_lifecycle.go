@@ -92,8 +92,10 @@ func (s *Service) Run(ctx context.Context) error {
 		s.coreManager.StartAutoRefresh(ctx, interval)
 		log.Infof("core auth auto-refresh started (interval=%s)", interval)
 		if s.paceEnabled() {
+			s.loadPaceState(ctx)
 			state := normalizedRoutingRuntimeState(s.cfg)
 			probe := newPaceProbe(s.cfg, s.coreManager, coreauth.DefaultPaceLedger(), state.paceProbeInterval)
+			probe.afterCycle = s.savePaceState
 			go probe.Run(ctx)
 		}
 	}
@@ -239,6 +241,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		if ctx == nil {
 			ctx = context.Background()
 		}
+		s.savePaceState()
 
 		s.homeLifecycleMu.Lock()
 		if supervisor := s.homeSupervisor; supervisor != nil {
