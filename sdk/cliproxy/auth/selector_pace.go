@@ -11,17 +11,28 @@ import (
 )
 
 // PaceSelector picks the available auth that is furthest behind even use of
-// its observed quota windows, from the passive snapshot (Quota.Signals)
-// recorded after each upstream response, so allowance that would expire unused
-// is spent first. It is a custom selector, not a built-in one, and is meant to
+// its observed quota windows, from the merged per-window PaceLedger fed after
+// each upstream response, so allowance that would expire unused is spent
+// first. It is a custom selector, not a built-in one, and is meant to
 // run as the session-affinity fallback: there it decides only new sessions,
 // expired bindings and failover, and the affinity wrapper hands it already
 // validated candidates.
-type PaceSelector struct{}
+type PaceSelector struct {
+	// Ledger supplies the observed windows; nil uses DefaultPaceLedger.
+	Ledger *PaceLedger
+}
+
+func (s *PaceSelector) ledger() *PaceLedger {
+	if s != nil && s.Ledger != nil {
+		return s.Ledger
+	}
+	return DefaultPaceLedger()
+}
 
 // paceWindow is one observed quota window. resetAt and duration are zero when
 // the upstream did not report them.
 type paceWindow struct {
+	key      PaceWindowKey
 	used     float64
 	resetAt  time.Time
 	duration time.Duration
@@ -46,13 +57,14 @@ func (s *PaceSelector) Pick(ctx context.Context, provider, model string, opts cl
 		return nil, err
 	}
 	available = preferCodexWebsocketAuths(ctx, provider, available)
+	ledger := s.ledger()
 	var best *Auth
 	bestScore := 0.0
 	for _, candidate := range available {
 		if candidate == nil {
 			continue
 		}
-		score := paceScore(candidate, now)
+		score := paceScoreWindows(ledger.Windows(candidate.ID, model), now)
 		if best == nil || score > bestScore || (score == bestScore && candidate.ID < best.ID) {
 			best = candidate
 			bestScore = score
@@ -64,18 +76,15 @@ func (s *PaceSelector) Pick(ctx context.Context, provider, model string, opts cl
 	return best, nil
 }
 
-// paceScore rates how much quota an auth has left relative to the time left in
-// each window. An auth with no live windows scores as fresh (100). Higher is
+// paceScoreWindows rates how much quota an auth has left relative to the time
+// left in each of its windows. An auth with no live windows scores as fresh (100). Higher is
 // further behind even use. Several timed windows combine by harmonic mean so
 // the tightest window dominates without ignoring the others; once any window
 // is exhausted (score <= 0) the minimum wins so the auth sorts last.
-func paceScore(auth *Auth, now time.Time) float64 {
-	if auth == nil {
-		return paceFreshScore
-	}
-	scores := make([]float64, 0, 4)
+func paceScoreWindows(windows []paceWindow, now time.Time) float64 {
+	scores := make([]float64, 0, len(windows))
 	timed := false
-	for _, window := range paceWindows(auth.Provider, auth.Quota) {
+	for _, window := range windows {
 		if !window.resetAt.IsZero() && !window.resetAt.After(now) {
 			continue
 		}
@@ -110,10 +119,11 @@ func paceScore(auth *Auth, now time.Time) float64 {
 	return float64(len(scores)) / inverseSum
 }
 
-// paceWindows extracts the credential-level quota windows from the passive
-// signal snapshot. Additional, model-scoped, and overage limits are ignored.
-func paceWindows(provider string, quota QuotaState) []paceWindow {
-	if len(quota.Signals) == 0 {
+// paceWindowsFromSignals extracts the credential-level quota windows from one
+// passive signal snapshot observed at observedAt. Additional, model-scoped, and
+// overage limits are ignored.
+func paceWindowsFromSignals(provider string, signals map[string]string, observedAt time.Time) []paceWindow {
+	if len(signals) == 0 {
 		return nil
 	}
 	var windows []paceWindow
@@ -124,30 +134,35 @@ func paceWindows(provider string, quota QuotaState) []paceWindow {
 			duration time.Duration
 		}{{"5h", claudeFiveHourWin}, {"7d", claudeSevenDayWin}} {
 			prefix := "Anthropic-Ratelimit-Unified-" + spec.name
-			used, ok := signalNumber(quota.Signals, prefix+"-Utilization")
+			used, ok := signalNumber(signals, prefix+"-Utilization")
 			if !ok {
 				continue
 			}
 			windows = append(windows, paceWindow{
+				key:      PaceWindowKey(spec.name),
 				used:     used * 100,
-				resetAt:  signalUnixTime(quota.Signals, prefix+"-Reset"),
+				resetAt:  signalUnixTime(signals, prefix+"-Reset"),
 				duration: spec.duration,
 			})
 		}
 	case "codex":
 		for _, name := range []string{"Primary", "Secondary"} {
 			prefix := "X-Codex-" + name
-			used, ok := signalNumber(quota.Signals, prefix+"-Used-Percent")
+			used, ok := signalNumber(signals, prefix+"-Used-Percent")
 			if !ok {
 				continue
 			}
-			window := paceWindow{used: used, resetAt: signalUnixTime(quota.Signals, prefix+"-Reset-At")}
-			if window.resetAt.IsZero() && !quota.ObservedAt.IsZero() {
-				if after, okAfter := signalNumber(quota.Signals, prefix+"-Reset-After-Seconds"); okAfter {
-					window.resetAt = quota.ObservedAt.Add(time.Duration(after * float64(time.Second)))
+			window := paceWindow{
+				key:     PaceWindowKey(strings.ToLower(name)),
+				used:    used,
+				resetAt: signalUnixTime(signals, prefix+"-Reset-At"),
+			}
+			if window.resetAt.IsZero() && !observedAt.IsZero() {
+				if after, okAfter := signalNumber(signals, prefix+"-Reset-After-Seconds"); okAfter {
+					window.resetAt = observedAt.Add(time.Duration(after * float64(time.Second)))
 				}
 			}
-			if minutes, okMinutes := signalNumber(quota.Signals, prefix+"-Window-Minutes"); okMinutes && minutes > 0 {
+			if minutes, okMinutes := signalNumber(signals, prefix+"-Window-Minutes"); okMinutes && minutes > 0 {
 				window.duration = time.Duration(minutes * float64(time.Minute))
 			}
 			windows = append(windows, window)

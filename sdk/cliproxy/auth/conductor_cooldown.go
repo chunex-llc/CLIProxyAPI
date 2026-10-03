@@ -1014,6 +1014,7 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 			if modelState != nil {
 				modelState.Quota.ObserveResponseHeadersForProvider(result.Provider, responseHeaders, now)
 			}
+			DefaultPaceLedger().ObserveResponseHeaders(auth.ID, result.Provider, responseHeaders, now)
 		}
 
 		_ = m.persist(ctx, auth)
