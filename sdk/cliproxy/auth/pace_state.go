@@ -85,10 +85,10 @@ func (s *SessionAffinitySelector) RestoreBindings(bindings []SessionBinding, now
 
 // PaceState is the pace ledger and session bindings saved across restarts.
 type PaceState struct {
-	Version  int                                            `json:"version"`
-	SavedAt  time.Time                                      `json:"saved_at"`
+	Version  int                                          `json:"version"`
+	SavedAt  time.Time                                    `json:"saved_at"`
 	Windows  map[string]map[PaceWindowKey]PaceObservation `json:"windows"`
-	Bindings []SessionBinding                               `json:"bindings"`
+	Bindings []SessionBinding                             `json:"bindings"`
 }
 
 // PaceStateStore reads and writes <authDir>/pace.state.
