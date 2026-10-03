@@ -75,3 +75,24 @@ func TestApplyManagerConfigStopsReplacedServiceAffinitySelector(t *testing.T) {
 		t.Fatal("expected replaced selector to be stopped during routing config apply")
 	}
 }
+
+func TestPaceRoutingSelector(t *testing.T) {
+	state := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{Strategy: " PACE "},
+	})
+	if state.strategy != "pace" {
+		t.Fatalf("strategy = %q, want pace", state.strategy)
+	}
+	if _, ok := newRoutingSelector(state).(*coreauth.PaceSelector); !ok {
+		t.Fatalf("selector type = %T, want *auth.PaceSelector", newRoutingSelector(state))
+	}
+
+	affinity := normalizedRoutingRuntimeState(&internalconfig.Config{
+		Routing: internalconfig.RoutingConfig{Strategy: " PACE ", SessionAffinity: true},
+	})
+	selector, ok := newRoutingSelector(affinity).(*coreauth.SessionAffinitySelector)
+	if !ok {
+		t.Fatalf("selector type = %T, want *auth.SessionAffinitySelector", newRoutingSelector(affinity))
+	}
+	selector.Stop()
+}

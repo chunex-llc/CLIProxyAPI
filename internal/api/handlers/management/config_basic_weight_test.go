@@ -10,3 +10,10 @@ func TestNormalizeRoutingStrategyWeightedRoundRobin(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeRoutingStrategyPace(t *testing.T) {
+	got, ok := normalizeRoutingStrategy("pace")
+	if !ok || got != "pace" {
+		t.Fatalf("normalizeRoutingStrategy(%q) = %q, %v; want pace, true", "pace", got, ok)
+	}
+}
