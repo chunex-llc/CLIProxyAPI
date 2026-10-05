@@ -148,6 +148,8 @@ routing:
   # Keeps the last reserve-percent of each credential's weekly quota out of new pace sessions
   # until release-before-reset-minutes before that window resets. Sessions already bound keep
   # their credential; when every credential is reserved, new sessions get "no auth available".
+  # The reserve applies within the highest available priority tier: a reserved higher-priority
+  # credential does not hand new sessions to a lower tier.
   # Ignored unless routing.strategy is pace.
   # reservation:
   #   enabled: true

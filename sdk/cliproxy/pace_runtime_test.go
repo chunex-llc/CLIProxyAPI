@@ -98,9 +98,9 @@ func TestPaceRuntime_ReservationFromConfig(t *testing.T) {
 	}
 }
 
-func TestPaceRuntime_UnchangedReservationReloadKeepsSelector(t *testing.T) {
+func TestPaceRuntime_UnchangedReservationReloadKeepsBinding(t *testing.T) {
 	service := &Service{coreManager: coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)}
-	reload := func() coreauth.Selector {
+	reload := func() {
 		cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{
 			Strategy:        "pace",
 			SessionAffinity: true,
@@ -109,13 +109,41 @@ func TestPaceRuntime_UnchangedReservationReloadKeepsSelector(t *testing.T) {
 		if !service.applyManagerConfig(context.Background(), configCommit{cfg: cfg, sequence: 1}) {
 			t.Fatal("applyManagerConfig failed")
 		}
-		return service.coreManager.Selector()
+		if stoppable, ok := service.coreManager.Selector().(interface{ Stop() }); ok {
+			t.Cleanup(stoppable.Stop)
+		}
 	}
-	first := reload()
-	if stoppable, ok := first.(interface{ Stop() }); ok {
-		t.Cleanup(stoppable.Stop)
+	ledger := coreauth.DefaultPaceLedger()
+	t.Cleanup(func() { ledger.Restore(nil, nil) })
+	now := time.Now()
+	week := 7 * 24 * time.Hour
+	observe := func(id string, used float64) {
+		ledger.Observe(id, map[coreauth.PaceWindowKey]coreauth.PaceObservation{
+			"secondary": {UsedPercent: used, ResetAt: now.Add(3 * 24 * time.Hour), Duration: week, ObservedAt: time.Now()},
+		})
 	}
-	if second := reload(); second != first {
-		t.Fatal("reloading an unchanged reservation replaced the selector and its session bindings")
+	auths := []*coreauth.Auth{{ID: "pace-reload-a", Provider: "codex"}, {ID: "pace-reload-b", Provider: "codex"}}
+	session := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_33333333-3333-3333-3333-333333333333"}}`)}
+	pick := func() string {
+		t.Helper()
+		got, err := service.coreManager.Selector().Pick(context.Background(), "codex", "", session, auths)
+		if err != nil || got == nil {
+			t.Fatalf("Pick() = %v, %v", got, err)
+		}
+		return got.ID
+	}
+
+	reload()
+	observe("pace-reload-a", 20)
+	observe("pace-reload-b", 70)
+	if got := pick(); got != "pace-reload-a" {
+		t.Fatalf("first Pick() = %q, want pace-reload-a", got)
+	}
+	// A new session would now go to b; the bound one must survive the reload.
+	observe("pace-reload-a", 70)
+	observe("pace-reload-b", 0)
+	reload()
+	if got := pick(); got != "pace-reload-a" {
+		t.Fatalf("Pick() after an unchanged reload = %q, want the bound pace-reload-a", got)
 	}
 }
