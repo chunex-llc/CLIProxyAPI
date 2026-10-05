@@ -16,10 +16,21 @@ import (
 // would expire unused is spent first. It is a custom selector, not a built-in one, and is meant to
 // run as the session-affinity fallback: there it decides only new sessions,
 // expired bindings and failover, and the affinity wrapper hands it already
-// validated candidates.
+// validated candidates. That placement is also why a Reservation never moves a
+// session that is already bound.
 type PaceSelector struct {
 	// Ledger supplies the observed windows; nil uses DefaultPaceLedger.
 	Ledger *PaceLedger
+	// Reservation, when set, keeps the tail of each weekly window for the
+	// account owner's direct use; nil reserves nothing.
+	Reservation *PaceReservation
+}
+
+// PaceReservation holds back the last ReservePercent of every weekly window
+// from new selections until ReleaseBeforeReset before that window resets.
+type PaceReservation struct {
+	ReservePercent     float64
+	ReleaseBeforeReset time.Duration
 }
 
 func (s *PaceSelector) ledger() *PaceLedger {
@@ -45,6 +56,8 @@ const (
 	paceFreshScore    = 100.0
 	claudeFiveHourWin = 300 * time.Minute
 	claudeSevenDayWin = 10080 * time.Minute
+	// paceWeek is the shortest window a reservation applies to.
+	paceWeek = 7 * 24 * time.Hour
 )
 
 // Pick filters like FillFirstSelector and returns the auth with the highest
@@ -60,20 +73,52 @@ func (s *PaceSelector) Pick(ctx context.Context, provider, model string, opts cl
 	ledger := s.ledger()
 	var best *Auth
 	bestScore := 0.0
+	var release time.Time
 	for _, candidate := range available {
 		if candidate == nil {
 			continue
 		}
-		score := paceScoreWindows(ledger.Windows(candidate.ID, model), now)
+		windows := ledger.Windows(candidate.ID, model)
+		if releaseAt, reserved := s.Reservation.reservedUntil(windows, now); reserved {
+			if release.IsZero() || releaseAt.Before(release) {
+				release = releaseAt
+			}
+			continue
+		}
+		score := paceScoreWindows(windows, now)
 		if best == nil || score > bestScore || (score == bestScore && candidate.ID < best.ID) {
 			best = candidate
 			bestScore = score
 		}
 	}
+	if best == nil && !release.IsZero() {
+		// Every candidate is reserved: never spend the reserve as a fallback.
+		return nil, newAuthUnavailableError(release, now)
+	}
 	if best == nil {
 		return available[0], nil
 	}
 	return best, nil
+}
+
+// reservedUntil reports whether any weekly window is inside its reserve and
+// not yet within ReleaseBeforeReset of resetting, and when the last such window
+// is released. A window without a known duration or reset never reserves.
+func (r *PaceReservation) reservedUntil(windows []paceWindow, now time.Time) (time.Time, bool) {
+	var until time.Time
+	if r == nil {
+		return until, false
+	}
+	for _, window := range windows {
+		if window.duration < paceWeek {
+			continue
+		}
+		releaseAt := window.resetAt.Add(-r.ReleaseBeforeReset)
+		if releaseAt.After(now) && window.used >= 100-r.ReservePercent && releaseAt.After(until) {
+			until = releaseAt
+		}
+	}
+	return until, !until.IsZero()
 }
 
 // paceScoreWindows rates how much quota an auth has left relative to the time

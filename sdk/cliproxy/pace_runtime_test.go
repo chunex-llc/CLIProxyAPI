@@ -9,6 +9,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 )
 
 // These tests share the process-wide pace ledger, so they use unique auth IDs
@@ -56,5 +57,65 @@ func TestPaceRuntime_SaveSkippedWithoutPace(t *testing.T) {
 	service.savePaceState()
 	if _, err := os.Stat(filepath.Join(service.cfg.AuthDir, "pace.state")); !os.IsNotExist(err) {
 		t.Fatalf("pace.state stat error = %v, want not exist", err)
+	}
+}
+
+// Fluid writes its managed hub config as JSON, which the YAML loader accepts.
+func TestPaceRuntime_ReservationFromConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := `{"routing":{"strategy":"pace","session-affinity":true,` +
+		`"reservation":{"enabled":true,"reserve-percent":8,"release-before-reset-minutes":120}}}`
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	cfg, err := internalconfig.LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig() error = %v", err)
+	}
+	selector := newRoutingSelector(normalizedRoutingRuntimeState(cfg))
+	if stoppable, ok := selector.(interface{ Stop() }); ok {
+		t.Cleanup(stoppable.Stop)
+	}
+
+	ledger := coreauth.DefaultPaceLedger()
+	t.Cleanup(func() { ledger.Restore(nil, nil) })
+	now := time.Now()
+	week := 7 * 24 * time.Hour
+	// Unreserved, pace prefers a: its 8% left expires in three hours.
+	ledger.Observe("pace-reserve-a", map[coreauth.PaceWindowKey]coreauth.PaceObservation{
+		"secondary": {UsedPercent: 92, ResetAt: now.Add(3 * time.Hour), Duration: week, ObservedAt: now},
+	})
+	ledger.Observe("pace-reserve-b", map[coreauth.PaceWindowKey]coreauth.PaceObservation{
+		"secondary": {UsedPercent: 20, ResetAt: now.Add(6 * 24 * time.Hour), Duration: week, ObservedAt: now},
+	})
+	auths := []*coreauth.Auth{{ID: "pace-reserve-a", Provider: "codex"}, {ID: "pace-reserve-b", Provider: "codex"}}
+	got, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() error = %v", err)
+	}
+	if got == nil || got.ID != "pace-reserve-b" {
+		t.Fatalf("Pick() auth = %v, want pace-reserve-b", got)
+	}
+}
+
+func TestPaceRuntime_UnchangedReservationReloadKeepsSelector(t *testing.T) {
+	service := &Service{coreManager: coreauth.NewManager(nil, &coreauth.RoundRobinSelector{}, nil)}
+	reload := func() coreauth.Selector {
+		cfg := &internalconfig.Config{Routing: internalconfig.RoutingConfig{
+			Strategy:        "pace",
+			SessionAffinity: true,
+			Reservation:     internalconfig.PaceReservationConfig{Enabled: true, ReservePercent: 8, ReleaseBeforeResetMinutes: 120},
+		}}
+		if !service.applyManagerConfig(context.Background(), configCommit{cfg: cfg, sequence: 1}) {
+			t.Fatal("applyManagerConfig failed")
+		}
+		return service.coreManager.Selector()
+	}
+	first := reload()
+	if stoppable, ok := first.(interface{ Stop() }); ok {
+		t.Cleanup(stoppable.Stop)
+	}
+	if second := reload(); second != first {
+		t.Fatal("reloading an unchanged reservation replaced the selector and its session bindings")
 	}
 }

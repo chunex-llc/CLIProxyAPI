@@ -376,6 +376,19 @@ type RoutingConfig struct {
 	// usage endpoint. Default: 10m. "0" disables polling.
 	// Ignored unless Strategy is "pace".
 	PaceProbeInterval string `yaml:"pace-probe-interval,omitempty" json:"pace-probe-interval,omitempty"`
+
+	// Reservation keeps the tail of each credential's weekly quota out of new
+	// pace selections. Ignored unless Strategy is "pace".
+	Reservation PaceReservationConfig `yaml:"reservation,omitempty" json:"reservation,omitempty"`
+}
+
+// PaceReservationConfig holds back the last ReservePercent of every weekly
+// quota window from new sessions until ReleaseBeforeResetMinutes before that
+// window resets. Sessions already bound to a credential keep using it.
+type PaceReservationConfig struct {
+	Enabled                   bool    `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	ReservePercent            float64 `yaml:"reserve-percent,omitempty" json:"reserve-percent,omitempty"`
+	ReleaseBeforeResetMinutes int     `yaml:"release-before-reset-minutes,omitempty" json:"release-before-reset-minutes,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
