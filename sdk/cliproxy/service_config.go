@@ -29,6 +29,9 @@ type routingRuntimeState struct {
 	sessionAffinity          bool
 	sessionAffinityTTL       time.Duration
 	sessionAffinitySubagents bool
+	// reservation is the pace reservation, zero when disabled. A value, not a
+	// pointer, so an unchanged reload compares equal and keeps session bindings.
+	reservation coreauth.PaceReservation
 }
 
 func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
@@ -61,6 +64,12 @@ func normalizedRoutingRuntimeState(cfg *config.Config) routingRuntimeState {
 	if state.sessionAffinity && cfg.Routing.SessionAffinitySubagents != nil {
 		state.sessionAffinitySubagents = *cfg.Routing.SessionAffinitySubagents
 	}
+	if reservation := cfg.Routing.Reservation; state.strategy == "pace" && reservation.Enabled && reservation.ReservePercent > 0 {
+		state.reservation = coreauth.PaceReservation{
+			ReservePercent:     reservation.ReservePercent,
+			ReleaseBeforeReset: time.Duration(max(reservation.ReleaseBeforeResetMinutes, 0)) * time.Minute,
+		}
+	}
 	return state
 }
 
@@ -72,7 +81,11 @@ func newRoutingSelector(state routingRuntimeState) coreauth.Selector {
 	case "fill-first":
 		selector = &coreauth.FillFirstSelector{}
 	case "pace":
-		selector = &coreauth.PaceSelector{}
+		pace := &coreauth.PaceSelector{}
+		if state.reservation.ReservePercent > 0 {
+			pace.Reservation = &state.reservation
+		}
+		selector = pace
 	default:
 		selector = &coreauth.RoundRobinSelector{}
 	}

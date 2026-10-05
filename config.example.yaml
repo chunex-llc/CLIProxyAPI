@@ -145,6 +145,16 @@ routing:
   # How often the pace strategy polls each credential's usage endpoint. Default: 10m
   # "0" disables polling. Ignored unless routing.strategy is pace.
   pace-probe-interval: "10m"
+  # Keeps the last reserve-percent of each credential's weekly quota out of new pace sessions
+  # until release-before-reset-minutes before that window resets. Sessions already bound keep
+  # their credential; when every credential is reserved, new sessions get "no auth available".
+  # The reserve applies within the highest available priority tier: a reserved higher-priority
+  # credential does not hand new sessions to a lower tier.
+  # Ignored unless routing.strategy is pace.
+  # reservation:
+  #   enabled: true
+  #   reserve-percent: 8
+  #   release-before-reset-minutes: 120
   # When true (default), subagents (child sessions with parent references) inherit and bind
   # to the parent's upstream credential across all providers (Claude, Codex, Antigravity, Gemini),
   # maximizing Prompt/KV Cache reuse and minimizing TTFT.

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"strconv"
@@ -211,5 +212,126 @@ func TestPaceSelectorPick_UnderSessionAffinity(t *testing.T) {
 	}
 	if got := pickPace(t, selector, session2, auths); got != "a" {
 		t.Fatalf("new-session Pick() auth.ID = %q, want %q", got, "a")
+	}
+}
+
+// testReservation is Fluid's managed policy: keep 8% of each weekly window,
+// released in the final two hours before it resets.
+var testReservation = &PaceReservation{ReservePercent: 8, ReleaseBeforeReset: 120 * time.Minute}
+
+func TestPaceSelectorPick_SkipsReservedAccount(t *testing.T) {
+	t.Parallel()
+	ledger := NewPaceLedger()
+	now := time.Now()
+	week := 10080 * time.Minute
+	// Unreserved, pace prefers a: its 8% left expires in three hours.
+	auths := []*Auth{
+		codexPaceAuth(ledger, "a", 92, week, now.Add(3*time.Hour)),
+		codexPaceAuth(ledger, "b", 20, week, now.Add(6*24*time.Hour)),
+	}
+	if got := pickPace(t, &PaceSelector{Ledger: ledger, Reservation: testReservation}, cliproxyexecutor.Options{}, auths); got != "b" {
+		t.Fatalf("Pick() auth.ID = %q, want %q", got, "b")
+	}
+}
+
+func TestPaceSelectorPick_AllReservedIsUnavailable(t *testing.T) {
+	t.Parallel()
+	ledger := NewPaceLedger()
+	now := time.Now()
+	week := 10080 * time.Minute
+	auths := []*Auth{
+		codexPaceAuth(ledger, "a", 92, week, now.Add(121*time.Minute)),
+		codexPaceAuth(ledger, "b", 99, week, now.Add(3*24*time.Hour)),
+	}
+	got, err := (&PaceSelector{Ledger: ledger, Reservation: testReservation}).Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if got != nil {
+		t.Fatalf("Pick() auth.ID = %q, want no auth", got.ID)
+	}
+	var authErr *Error
+	if !errors.As(err, &authErr) || authErr.Code != "auth_unavailable" {
+		t.Fatalf("Pick() error = %v, want auth_unavailable", err)
+	}
+	// a is released first, a minute from now.
+	headered, ok := err.(interface{ Headers() http.Header })
+	if !ok {
+		t.Fatalf("Pick() error %T carries no headers", err)
+	}
+	if retry, _ := strconv.Atoi(headered.Headers().Get("Retry-After")); retry <= 0 || retry > 60 {
+		t.Fatalf("Pick() Retry-After = %q, want 1-60 seconds", headered.Headers().Get("Retry-After"))
+	}
+}
+
+func TestPaceSelectorPick_ReservationEligibility(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	week := 10080 * time.Minute
+	cases := []struct {
+		name     string
+		model    string
+		observe  func(ledger *PaceLedger)
+		eligible bool
+	}{
+		{"above reserve", "", func(l *PaceLedger) { observeCodexPace(l, "a", 91, week, now.Add(3*time.Hour)) }, true},
+		{"inside reserve", "", func(l *PaceLedger) { observeCodexPace(l, "a", 92, week, now.Add(3*time.Hour)) }, false},
+		{"released at two hours", "", func(l *PaceLedger) { observeCodexPace(l, "a", 92, week, now.Add(120*time.Minute)) }, true},
+		{"reserved just before release", "", func(l *PaceLedger) { observeCodexPace(l, "a", 92, week, now.Add(121*time.Minute)) }, false},
+		{"no quota data", "", func(*PaceLedger) {}, true},
+		{"unknown reset", "", func(l *PaceLedger) {
+			l.Observe("a", map[PaceWindowKey]PaceObservation{"secondary": {UsedPercent: 99, Duration: week, ObservedAt: now}})
+		}, true},
+		{"short window ignored", "", func(l *PaceLedger) { observeCodexPace(l, "a", 99, 300*time.Minute, now.Add(3*time.Hour)) }, true},
+		{"claude seven-day window", "", func(l *PaceLedger) {
+			claudePaceAuth(l, "a", "0.1", now.Add(time.Hour), "0.95", now.Add(3*24*time.Hour))
+		}, false},
+		{"matching model-scoped weekly window", "claude-fable-5-1", func(l *PaceLedger) {
+			l.Observe("a", map[PaceWindowKey]PaceObservation{"model:fable": {UsedPercent: 95, ResetAt: now.Add(3 * 24 * time.Hour), Duration: week, ObservedAt: now}})
+		}, false},
+		{"other model's weekly window", "claude-opus-5-5", func(l *PaceLedger) {
+			l.Observe("a", map[PaceWindowKey]PaceObservation{"model:fable": {UsedPercent: 95, ResetAt: now.Add(3 * 24 * time.Hour), Duration: week, ObservedAt: now}})
+		}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := NewPaceLedger()
+			tc.observe(ledger)
+			selector := &PaceSelector{Ledger: ledger, Reservation: testReservation}
+			got, err := selector.Pick(context.Background(), "codex", tc.model, cliproxyexecutor.Options{}, []*Auth{{ID: "a", Provider: "codex"}})
+			if tc.eligible && (err != nil || got == nil || got.ID != "a") {
+				t.Fatalf("Pick() = %v, %v; want a", got, err)
+			}
+			if !tc.eligible && (err == nil || got != nil) {
+				t.Fatalf("Pick() = %v, %v; want reserved", got, err)
+			}
+		})
+	}
+}
+
+func TestPaceSelectorPick_ReservationKeepsBoundSession(t *testing.T) {
+	t.Parallel()
+	ledger := NewPaceLedger()
+	selector := NewSessionAffinitySelectorWithConfig(SessionAffinityConfig{
+		Fallback: &PaceSelector{Ledger: ledger, Reservation: testReservation},
+		TTL:      time.Hour,
+	})
+	defer selector.Stop()
+
+	now := time.Now()
+	week := 10080 * time.Minute
+	a := codexPaceAuth(ledger, "a", 20, week, now.Add(3*24*time.Hour))
+	b := codexPaceAuth(ledger, "b", 70, week, now.Add(3*24*time.Hour))
+	auths := []*Auth{a, b}
+	session1 := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_11111111-1111-1111-1111-111111111111"}}`)}
+	session2 := cliproxyexecutor.Options{OriginalRequest: []byte(`{"metadata":{"user_id":"user_xxx_account__session_22222222-2222-2222-2222-222222222222"}}`)}
+
+	if got := pickPace(t, selector, session1, auths); got != "a" {
+		t.Fatalf("first Pick() auth.ID = %q, want %q", got, "a")
+	}
+	observeCodexPace(ledger, a.ID, 95, week, now.Add(3*24*time.Hour))
+
+	if got := pickPace(t, selector, session1, auths); got != "a" {
+		t.Fatalf("bound-session Pick() auth.ID = %q, want %q", got, "a")
+	}
+	if got := pickPace(t, selector, session2, auths); got != "b" {
+		t.Fatalf("new-session Pick() auth.ID = %q, want %q", got, "b")
 	}
 }
